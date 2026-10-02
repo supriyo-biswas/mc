@@ -103,7 +103,7 @@ func printAliases(aliases ...aliasMessage) {
 			// Format properly for alignment based on alias length only in non json mode.
 			alias.Alias = fmt.Sprintf("%-*.*s", maxAlias, maxAlias, alias.Alias)
 		}
-		if alias.AccessKey == "" || alias.SecretKey == "" {
+		if (alias.AccessKey == "" || alias.SecretKey == "") && len(alias.CredentialProcess) == 0 {
 			alias.AccessKey = ""
 			alias.SecretKey = ""
 			alias.API = ""
@@ -121,13 +121,14 @@ func (d byAlias) Less(i, j int) bool { return d[i].Alias < d[j].Alias }
 
 func buildAliasMessage(alias string, deprecated bool, aliasCfg *aliasConfigV10) aliasMessage {
 	aliasMsg := aliasMessage{
-		prettyPrint: false,
-		Alias:       alias,
-		URL:         aliasCfg.URL,
-		AccessKey:   aliasCfg.AccessKey,
-		SecretKey:   aliasCfg.SecretKey,
-		API:         aliasCfg.API,
-		Src:         aliasCfg.Src,
+		prettyPrint:       false,
+		Alias:             alias,
+		URL:               aliasCfg.URL,
+		AccessKey:         aliasCfg.AccessKey,
+		SecretKey:         aliasCfg.SecretKey,
+		CredentialProcess: aliasCfg.CredentialProcess,
+		API:               aliasCfg.API,
+		Src:               aliasCfg.Src,
 	}
 
 	if deprecated {

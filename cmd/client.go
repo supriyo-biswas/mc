@@ -238,6 +238,7 @@ type Config struct {
 	AccessKey         string
 	SecretKey         string
 	SessionToken      string
+	CredentialProcess []string
 	Signature         string
 	HostURL           string
 	AppName           string
@@ -286,14 +287,18 @@ func (config *Config) getCredsChain() ([]credentials.Provider, *probe.Error) {
 		signType = credentials.SignatureV2
 	}
 
-	// Credentials
-	creds := &credentials.Static{
-		Value: credentials.Value{
-			AccessKeyID:     config.AccessKey,
-			SecretAccessKey: config.SecretKey,
-			SessionToken:    config.SessionToken,
-			SignerType:      signType,
-		},
+	var creds credentials.Provider
+	if len(config.CredentialProcess) > 0 {
+		creds = newCredentialProcessProvider(config.CredentialProcess, signType)
+	} else {
+		creds = &credentials.Static{
+			Value: credentials.Value{
+				AccessKeyID:     config.AccessKey,
+				SecretAccessKey: config.SecretKey,
+				SessionToken:    config.SessionToken,
+				SignerType:      signType,
+			},
+		}
 	}
 	credsChain = append(credsChain, creds)
 	return credsChain, nil

@@ -33,15 +33,16 @@ var (
 
 // aliasConfig configuration of an alias.
 type aliasConfigV10 struct {
-	URL          string `json:"url"`
-	AccessKey    string `json:"accessKey"`
-	SecretKey    string `json:"secretKey"`
-	SessionToken string `json:"sessionToken,omitempty"`
-	API          string `json:"api"`
-	Path         string `json:"path"`
-	License      string `json:"license,omitempty"`
-	APIKey       string `json:"apiKey,omitempty"`
-	Src          string `json:"src,omitempty"`
+	URL               string   `json:"url"`
+	AccessKey         string   `json:"accessKey,omitempty"`
+	SecretKey         string   `json:"secretKey,omitempty"`
+	SessionToken      string   `json:"sessionToken,omitempty"`
+	CredentialProcess []string `json:"credentialProcess,omitempty"`
+	API               string   `json:"api"`
+	Path              string   `json:"path"`
+	License           string   `json:"license,omitempty"`
+	APIKey            string   `json:"apiKey,omitempty"`
+	Src               string   `json:"src,omitempty"`
 }
 
 // configV10 config version.

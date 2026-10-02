@@ -87,6 +87,14 @@ func checkCredentialsSyntax(credentials aliasConfigV10) {
 	if !isValidHostURL(credentials.URL) {
 		fatalIf(errInvalidURL(credentials.URL), "Invalid URL.")
 	}
+	if len(credentials.CredentialProcess) > 0 {
+		if strings.TrimSpace(credentials.CredentialProcess[0]) == "" {
+			fatalIf(errInvalidArgument(), "Credential process command cannot be empty.")
+		}
+		if credentials.AccessKey != "" || credentials.SecretKey != "" || credentials.SessionToken != "" {
+			fatalIf(errInvalidArgument(), "Credential process and static credentials cannot be configured together.")
+		}
+	}
 
 	if !isValidAccessKey(credentials.AccessKey) {
 		fatalIf(errInvalidArgument().Trace(credentials.AccessKey),
@@ -119,12 +127,13 @@ func importAlias(alias string, aliasCfgV10 aliasConfigV10) aliasMessage {
 	mcCfgV10.Aliases[alias] = aliasCfgV10
 	fatalIf(saveMcConfig(mcCfgV10).Trace(alias), "Unable to import credentials to `"+mustGetMcConfigPath()+"`.")
 	return aliasMessage{
-		Alias:     alias,
-		URL:       mcCfgV10.Aliases[alias].URL,
-		AccessKey: mcCfgV10.Aliases[alias].AccessKey,
-		SecretKey: mcCfgV10.Aliases[alias].SecretKey,
-		API:       mcCfgV10.Aliases[alias].API,
-		Path:      mcCfgV10.Aliases[alias].Path,
+		Alias:             alias,
+		URL:               mcCfgV10.Aliases[alias].URL,
+		AccessKey:         mcCfgV10.Aliases[alias].AccessKey,
+		SecretKey:         mcCfgV10.Aliases[alias].SecretKey,
+		CredentialProcess: mcCfgV10.Aliases[alias].CredentialProcess,
+		API:               mcCfgV10.Aliases[alias].API,
+		Path:              mcCfgV10.Aliases[alias].Path,
 	}
 }
 

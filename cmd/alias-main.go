@@ -18,6 +18,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/pkg/v3/console"
@@ -64,16 +66,17 @@ func mainAlias(ctx *cli.Context) error {
 
 // aliasMessage container for content message structure
 type aliasMessage struct {
-	op          string
-	prettyPrint bool
-	Status      string `json:"status"`
-	Alias       string `json:"alias"`
-	URL         string `json:"URL"`
-	AccessKey   string `json:"accessKey,omitempty"`
-	SecretKey   string `json:"secretKey,omitempty"`
-	API         string `json:"api,omitempty"`
-	Path        string `json:"path,omitempty"`
-	Src         string `json:"src,omitempty"`
+	op                string
+	prettyPrint       bool
+	Status            string   `json:"status"`
+	Alias             string   `json:"alias"`
+	URL               string   `json:"URL"`
+	AccessKey         string   `json:"accessKey,omitempty"`
+	SecretKey         string   `json:"secretKey,omitempty"`
+	CredentialProcess []string `json:"credentialProcess,omitempty"`
+	API               string   `json:"api,omitempty"`
+	Path              string   `json:"path,omitempty"`
+	Src               string   `json:"src,omitempty"`
 	// Deprecated field, replaced by Path
 	Lookup string `json:"lookup,omitempty"`
 }
@@ -90,6 +93,7 @@ func (h aliasMessage) String() string {
 			Row{"URL", "URL"},
 			Row{"AccessKey", "AccessKey"},
 			Row{"SecretKey", "SecretKey"},
+			Row{"Credential Process", "CredentialProcess"},
 			Row{"API", "API"},
 			Row{"Path", "Path"},
 			Row{"Src", "Src"},
@@ -99,7 +103,7 @@ func (h aliasMessage) String() string {
 		if path == "" {
 			path = h.Lookup
 		}
-		return t.buildRecord(h.Alias, h.URL, h.AccessKey, h.SecretKey, h.API, path, h.Src)
+		return t.buildRecord(h.Alias, h.URL, h.AccessKey, h.SecretKey, strings.Join(h.CredentialProcess, " "), h.API, path, h.Src)
 	case "remove":
 		return console.Colorize("AliasMessage", "Removed `"+h.Alias+"` successfully.")
 	case "add": // add is deprecated

@@ -41,6 +41,10 @@ const cred = "YellowItalics"
 
 var aliasSetFlags = []cli.Flag{
 	cli.StringFlag{
+		Name:  "credential-process",
+		Usage: "external command that returns credentials as JSON",
+	},
+	cli.StringFlag{
 		Name:  "path",
 		Value: "auto",
 		Usage: "bucket path lookup supported by the server. Valid options are '[auto, on, off]'",
@@ -67,6 +71,7 @@ var aliasSetCmd = cli.Command{
 
 USAGE:
   {{.HelpName}} ALIAS URL ACCESSKEY SECRETKEY
+  {{.HelpName}} ALIAS URL --credential-process "COMMAND"
 
 FLAGS:
   {{range .VisibleFlags}}{{.}}
@@ -95,11 +100,14 @@ EXAMPLES:
      {{.Prompt}} echo -e "BKIKJAA5BMMU2RHO6IBB\nV8f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12" | \
                  {{.HelpName}} mys3 https://s3.amazonaws.com --api "s3v4" --path "off"
      {{.EnableHistory}}
+  6. Add Amazon S3 storage service under "mys3" alias using an external credential process.
+     {{.Prompt}} {{.HelpName}} mys3 https://s3.amazonaws.com \
+                 --credential-process "credential-helper --profile mys3" --api "s3v4" --path "off"
 `,
 }
 
 // checkAliasSetSyntax - verifies input arguments to 'alias set'.
-func checkAliasSetSyntax(ctx *cli.Context, accessKey, secretKey string, deprecated bool) {
+func checkAliasSetSyntax(ctx *cli.Context, accessKey, secretKey string, credentialProcess []string, deprecated bool) {
 	args := ctx.Args()
 	argsNr := len(args)
 
@@ -107,9 +115,12 @@ func checkAliasSetSyntax(ctx *cli.Context, accessKey, secretKey string, deprecat
 		cli.ShowCommandHelpAndExit(ctx, ctx.Command.Name, 1) // last argument is exit code
 	}
 
-	if argsNr > 4 || argsNr < 2 {
+	if argsNr > 4 || argsNr < 2 || (ctx.IsSet("credential-process") && argsNr != 2) {
 		fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
 			"Incorrect number of arguments for alias set command.")
+	}
+	if ctx.IsSet("credential-process") && len(credentialProcess) == 0 {
+		fatalIf(errInvalidArgument(), "Credential process command cannot be empty.")
 	}
 
 	alias := cleanAlias(args.Get(0))
@@ -166,18 +177,19 @@ func setAlias(alias string, aliasCfgV10 aliasConfigV10) aliasMessage {
 	fatalIf(err.Trace(alias), "Unable to update hosts in config version `"+mustGetMcConfigPath()+"`.")
 
 	return aliasMessage{
-		Alias:     alias,
-		URL:       aliasCfgV10.URL,
-		AccessKey: aliasCfgV10.AccessKey,
-		SecretKey: aliasCfgV10.SecretKey,
-		API:       aliasCfgV10.API,
-		Path:      aliasCfgV10.Path,
+		Alias:             alias,
+		URL:               aliasCfgV10.URL,
+		AccessKey:         aliasCfgV10.AccessKey,
+		SecretKey:         aliasCfgV10.SecretKey,
+		CredentialProcess: aliasCfgV10.CredentialProcess,
+		API:               aliasCfgV10.API,
+		Path:              aliasCfgV10.Path,
 	}
 }
 
 // probeS3Signature - auto probe S3 server signature: issue a Stat call
 // using v4 signature then v2 in case of failure.
-func probeS3Signature(ctx context.Context, accessKey, secretKey, url string, peerCert *x509.Certificate) (string, *probe.Error) {
+func probeS3Signature(ctx context.Context, accessKey, secretKey string, credentialProcess []string, url string, peerCert *x509.Certificate) (string, *probe.Error) {
 	probeBucketName := randString(60, rand.NewSource(time.Now().UnixNano()), "probe-bsign-")
 	// Test s3 connection for API auto probe
 	s3Config := &Config{
@@ -185,6 +197,7 @@ func probeS3Signature(ctx context.Context, accessKey, secretKey, url string, pee
 		Insecure:          globalInsecure,
 		AccessKey:         accessKey,
 		SecretKey:         secretKey,
+		CredentialProcess: credentialProcess,
 		HostURL:           urlJoinPath(url, probeBucketName),
 		Debug:             globalDebug,
 		ConnReadDeadline:  globalConnReadDeadline,
@@ -234,12 +247,13 @@ func probeS3Signature(ctx context.Context, accessKey, secretKey, url string, pee
 
 // BuildS3Config constructs an S3 Config and does
 // signature auto-probe when needed.
-func BuildS3Config(ctx context.Context, alias, url, accessKey, secretKey, api, path string, peerCert *x509.Certificate) (*Config, *probe.Error) {
+func BuildS3Config(ctx context.Context, alias, url, accessKey, secretKey string, credentialProcess []string, api, path string, peerCert *x509.Certificate) (*Config, *probe.Error) {
 	s3Config := NewS3Config(alias, url, &aliasConfigV10{
-		AccessKey: accessKey,
-		SecretKey: secretKey,
-		URL:       url,
-		Path:      path,
+		AccessKey:         accessKey,
+		SecretKey:         secretKey,
+		CredentialProcess: credentialProcess,
+		URL:               url,
+		Path:              path,
 	})
 
 	if peerCert != nil {
@@ -253,7 +267,7 @@ func BuildS3Config(ctx context.Context, alias, url, accessKey, secretKey, api, p
 		return s3Config, nil
 	}
 	// Probe S3 signature version
-	api, err := probeS3Signature(ctx, accessKey, secretKey, url, peerCert)
+	api, err := probeS3Signature(ctx, accessKey, secretKey, credentialProcess, url, peerCert)
 	if err != nil {
 		return nil, err.Trace(url, accessKey, api, path)
 	}
@@ -303,11 +317,12 @@ func fetchAliasKeys(args cli.Args) (string, string) {
 func mainAliasSet(cli *cli.Context, deprecated bool) error {
 	console.SetColor("AliasMessage", color.New(color.FgGreen))
 	var (
-		args  = cli.Args()
-		alias = cleanAlias(args.Get(0))
-		url   = trimTrailingSeparator(args.Get(1))
-		api   = cli.String("api")
-		path  = cli.String("path")
+		args              = cli.Args()
+		alias             = cleanAlias(args.Get(0))
+		url               = trimTrailingSeparator(args.Get(1))
+		api               = cli.String("api")
+		path              = cli.String("path")
+		credentialProcess []string
 
 		peerCert *x509.Certificate
 		err      *probe.Error
@@ -327,8 +342,18 @@ func mainAliasSet(cli *cli.Context, deprecated bool) error {
 		}
 	}
 
-	accessKey, secretKey := fetchAliasKeys(args)
-	checkAliasSetSyntax(cli, accessKey, secretKey, deprecated)
+	var accessKey, secretKey string
+	if cli.IsSet("credential-process") {
+		var e error
+		credentialProcess, e = splitCredentialProcess(cli.String("credential-process"))
+		fatalIf(probe.NewError(e), "Unable to parse credential process command.")
+		if len(credentialProcess) > 0 && strings.TrimSpace(credentialProcess[0]) == "" {
+			credentialProcess = nil
+		}
+	} else {
+		accessKey, secretKey = fetchAliasKeys(args)
+	}
+	checkAliasSetSyntax(cli, accessKey, secretKey, credentialProcess, deprecated)
 
 	ctx, cancelAliasAdd := context.WithCancel(globalContext)
 	defer cancelAliasAdd()
@@ -338,15 +363,16 @@ func mainAliasSet(cli *cli.Context, deprecated bool) error {
 		fatalIf(err.Trace(alias, url, accessKey), "Unable to initialize new alias from the provided credentials.")
 	}
 
-	s3Config, err := BuildS3Config(ctx, alias, url, accessKey, secretKey, api, path, peerCert)
+	s3Config, err := BuildS3Config(ctx, alias, url, accessKey, secretKey, credentialProcess, api, path, peerCert)
 	fatalIf(err.Trace(alias, url, accessKey), "Unable to initialize new alias from the provided credentials.")
 
 	msg := setAlias(alias, aliasConfigV10{
-		URL:       s3Config.HostURL,
-		AccessKey: s3Config.AccessKey,
-		SecretKey: s3Config.SecretKey,
-		API:       s3Config.Signature,
-		Path:      path,
+		URL:               s3Config.HostURL,
+		AccessKey:         s3Config.AccessKey,
+		SecretKey:         s3Config.SecretKey,
+		CredentialProcess: s3Config.CredentialProcess,
+		API:               s3Config.Signature,
+		Path:              path,
 	}) // Add an alias with specified credentials.
 
 	msg.op = "set"

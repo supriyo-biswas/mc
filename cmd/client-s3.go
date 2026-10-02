@@ -162,6 +162,10 @@ func getConfigHash(config *Config) uint32 {
 	// Generate a hash out of s3Conf.
 	confHash := fnv.New32a()
 	confHash.Write([]byte(hostName + config.AccessKey + config.SecretKey + config.SessionToken))
+	for _, arg := range config.CredentialProcess {
+		confHash.Write([]byte{0})
+		confHash.Write([]byte(arg))
+	}
 	confSum := confHash.Sum32()
 	return confSum
 }
@@ -228,8 +232,13 @@ func newFactory() func(config *Config) (Client, *probe.Error) {
 
 			var e error
 
+			creds := credentials.NewChainCredentials(credsChain)
+			if len(config.CredentialProcess) > 0 {
+				creds = credentials.New(&credentialProviderChain{providers: credsChain})
+			}
+
 			options := minio.Options{
-				Creds:           credentials.NewChainCredentials(credsChain),
+				Creds:           creds,
 				Secure:          useTLS,
 				Region:          env.Get("MC_REGION", env.Get("AWS_REGION", "")),
 				BucketLookup:    config.Lookup,
