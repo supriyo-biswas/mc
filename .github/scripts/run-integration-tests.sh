@@ -43,12 +43,12 @@ host_port="${MC_INTEGRATION_PORT:-9000}"
 access_key="${MC_TEST_ACCESS_KEY:-mc-integration}"
 secret_key="${MC_TEST_SECRET_KEY:-mc-integration-secret}"
 
-MINIO_LEGACY_IMAGE="${MINIO_LEGACY_IMAGE:-minio/minio:RELEASE.2025-09-07T16-13-09Z}"
-RUSTFS_IMAGE="${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-rc.5}"
-GARAGE_IMAGE="${GARAGE_IMAGE:-dxflrs/garage:v2.2.0}"
-SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.45}"
-VERSITYGW_IMAGE="${VERSITYGW_IMAGE:-versity/versitygw:v1.7.0}"
-AISTOR_IMAGE="${AISTOR_IMAGE:-quay.io/minio/aistor/minio:EDGE.2026-08-27T19-40-07Z}"
+MINIO_LEGACY_IMAGE="${MINIO_LEGACY_IMAGE:-cgr.dev/chainguard/minio:latest}"
+RUSTFS_IMAGE="${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0}"
+GARAGE_IMAGE="${GARAGE_IMAGE:-dxflrs/garage:v2.3.0}"
+SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.47}"
+VERSITYGW_IMAGE="${VERSITYGW_IMAGE:-versity/versitygw:v1.8.0}"
+AISTOR_IMAGE="${AISTOR_IMAGE:-quay.io/minio/aistor/minio:RELEASE.2026-09-19T17-05-25Z}"
 
 aistor_license_path="$repo_root/data/aistor.license"
 if [ "$backend" = aistor ] && [ ! -s "$aistor_license_path" ]; then
@@ -92,11 +92,11 @@ start_minio_legacy() {
 
 	docker run --detach --name "$container_name" \
 		--publish "$host_port:9000" \
-		--tmpfs /data \
-		--volume "$cert_dir:/root/.minio/certs:ro" \
+		--tmpfs /data:uid=65532,gid=65532,mode=700 \
+		--volume "$cert_dir:/certs:ro" \
 		--env MINIO_ROOT_USER="$access_key" \
 		--env MINIO_ROOT_PASSWORD="$secret_key" \
-		"$MINIO_LEGACY_IMAGE" server /data >/dev/null
+		"$MINIO_LEGACY_IMAGE" server /data --certs-dir /certs >/dev/null
 
 	service_protocol=https
 	skip_insecure=true
@@ -116,15 +116,19 @@ start_rustfs() {
 start_garage() {
 	# Garage requires an initialized layout and explicit bucket/key permissions
 	# before its S3 API can be used by the shared integration suite.
+	# Garage accepts storage-class headers but always reports STANDARD.
 	skip_storage_class_check=true
-	skip_object_tagging=true
-	skip_alias_error_check=true
 	skip_storage_class_error=true
-	presigned_post_error="InvalidRequest"
-	skip_watch=true
-	skip_config_error=true
+	# Garage does not implement the S3 object-tagging API.
+	skip_object_tagging=true
 	# Garage does not implement bucket versioning.
 	skip_rm_version_incomplete=true
+	# Garage does not validate credentials until the first authenticated request.
+	skip_alias_error_check=true
+	presigned_post_error="InvalidRequest"
+	# Garage does not expose MinIO-compatible bucket notifications.
+	skip_watch=true
+	skip_config_error=true
 	local garage_dir="$work_dir/garage"
 	mkdir -p "$garage_dir/meta" "$garage_dir/data"
 	cat >"$garage_dir/garage.toml" <<'EOF'
@@ -189,9 +193,10 @@ start_seaweedfs() {
 	# SeaweedFS Mini provisions a local S3 endpoint and uses the AWS credential
 	# environment variables as its initial administrator credentials.
 	skip_presigned_post=true
-	skip_watch=true
 	# SeaweedFS does not reliably retain and abort interrupted multipart uploads.
 	skip_rm_version_incomplete=true
+	# SeaweedFS does not expose MinIO-compatible bucket notifications.
+	skip_watch=true
 	docker run --detach --name "$container_name" \
 		--publish "$host_port:8333" \
 		--tmpfs /data \
@@ -204,8 +209,10 @@ start_seaweedfs() {
 start_versitygw() {
 	# VersityGW's POSIX backend uses a local IAM directory for the root
 	# credentials and a separate directory for object versions.
+	# The POSIX backend accepts storage-class headers but reports STANDARD.
 	skip_storage_class_check=true
 	skip_storage_class_error=true
+	# VersityGW does not expose MinIO-compatible bucket notifications.
 	skip_watch=true
 	local versity_dir="$work_dir/versitygw"
 	mkdir -p "$versity_dir/iam" "$versity_dir/s3" "$versity_dir/versioning"
