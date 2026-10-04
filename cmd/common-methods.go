@@ -560,6 +560,31 @@ func newClient(aliasedURL string) (Client, *probe.Error) {
 	return newClientFromAlias(alias, urlStrFull)
 }
 
+// initializeRemoteClients constructs and caches the S3 clients referenced by
+// URLs. Transfer commands call this before starting progress output so any
+// interactive credential processes finish before the progress line is drawn.
+func initializeRemoteClients(URLs ...string) *probe.Error {
+	initialized := make(map[string]struct{})
+	for _, URL := range URLs {
+		alias, urlStr, aliasCfg, err := expandAlias(URL)
+		if err != nil {
+			return err.Trace(URL)
+		}
+		if aliasCfg == nil {
+			continue
+		}
+		if _, ok := initialized[alias]; ok {
+			continue
+		}
+		initialized[alias] = struct{}{}
+
+		if _, err = S3New(NewS3Config(alias, urlStr, aliasCfg)); err != nil {
+			return err.Trace(URL)
+		}
+	}
+	return nil
+}
+
 // requireAliasedURLs ensures every URL belongs to a configured S3 alias.
 func requireAliasedURLs(command string, URLs ...string) *probe.Error {
 	for _, URL := range URLs {

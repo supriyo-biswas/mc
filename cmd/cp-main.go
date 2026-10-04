@@ -310,9 +310,17 @@ func printCopyURLsError(cpURLs *URLs) {
 func doCopySession(ctx context.Context, cancelCopy context.CancelFunc, cli *cli.Context, encryptionKeys map[string][]prefixSSEPair, isMvCmd bool) error {
 	var isCopied func(string) bool
 	var totalObjects, totalBytes int64
+	sourceURLs := cli.Args()[:len(cli.Args())-1]
+	targetURL := cli.Args()[len(cli.Args())-1] // Last one is target
+	clientURLs := append(append([]string(nil), sourceURLs...), targetURL)
+	fatalIf(initializeRemoteClients(clientURLs...), "Unable to initialize transfer clients.")
 
 	cpURLsCh := make(chan URLs, 10000)
 	errSeen := false
+
+	// Check if the target path has object locking enabled before starting the
+	// progress bar. This can perform a remote request.
+	withLock, _ := isBucketLockEnabled(ctx, targetURL)
 
 	// Store a progress bar or an accounter
 	var pg ProgressReader
@@ -323,11 +331,6 @@ func doCopySession(ctx context.Context, cancelCopy context.CancelFunc, cli *cli.
 	} else {
 		pg = newAccounter(totalBytes)
 	}
-	sourceURLs := cli.Args()[:len(cli.Args())-1]
-	targetURL := cli.Args()[len(cli.Args())-1] // Last one is target
-
-	// Check if the target path has object locking enabled
-	withLock, _ := isBucketLockEnabled(ctx, targetURL)
 
 	isRecursive := cli.Bool("recursive")
 	olderThan := cli.String("older-than")

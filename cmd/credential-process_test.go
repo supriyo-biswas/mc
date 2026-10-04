@@ -10,16 +10,24 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-func TestCredentialProcessHelper(t *testing.T) {
+func TestCredentialProcessHelper(_ *testing.T) {
 	output := os.Getenv("MC_CREDENTIAL_PROCESS_TEST_OUTPUT")
 	if output == "" {
 		return
@@ -28,18 +36,37 @@ func TestCredentialProcessHelper(t *testing.T) {
 		_, _ = os.Stderr.WriteString(output)
 		os.Exit(2)
 	}
+	if os.Getenv("MC_CREDENTIAL_PROCESS_TEST_READ_STDIN") != "" {
+		_, _ = os.Stderr.WriteString("credential prompt")
+		input, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			os.Exit(3)
+		}
+		output = fmt.Sprintf(`{"AccessKeyId":%q,"SecretAccessKey":"secret"}`, strings.TrimSpace(string(input)))
+	}
 	_, _ = os.Stdout.WriteString(output)
 	os.Exit(0)
 }
 
-func credentialProcessTestCommand() []string {
-	return []string{os.Args[0], "-test.run=^TestCredentialProcessHelper$"}
+func credentialProcessTestCommand(unique ...string) []string {
+	command := []string{os.Args[0], "-test.run=^TestCredentialProcessHelper$"}
+	if len(unique) > 0 {
+		command = append(command, "--")
+		command = append(command, unique...)
+	}
+	return command
+}
+
+func newTestCredentialProcessProvider(command []string, signerType credentials.SignatureType) *credentialProcessProvider {
+	provider := newCredentialProcessProvider(command, signerType)
+	provider.manager = newCredentialProcessManager(runCredentialProcess)
+	return provider
 }
 
 func TestCredentialProcessProvider(t *testing.T) {
 	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_OUTPUT", `{"Version":1,"AccessKeyId":"access","SecretAccessKey":"secret","SessionToken":"token"}`)
 
-	provider := newCredentialProcessProvider(credentialProcessTestCommand(), credentials.SignatureV2)
+	provider := newTestCredentialProcessProvider(credentialProcessTestCommand(), credentials.SignatureV2)
 	value, err := provider.Retrieve()
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +87,7 @@ func TestCredentialProcessProviderExpiration(t *testing.T) {
 	expiration := now.Add(time.Hour)
 	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_OUTPUT", `{"AccessKeyId":"access","SecretAccessKey":"secret","Expiration":"`+expiration.Format(time.RFC3339)+`"}`)
 
-	provider := newCredentialProcessProvider(credentialProcessTestCommand(), credentials.SignatureV4)
+	provider := newTestCredentialProcessProvider(credentialProcessTestCommand(), credentials.SignatureV4)
 	provider.now = func() time.Time { return now }
 	value, err := provider.Retrieve()
 	if err != nil {
@@ -106,7 +133,7 @@ func TestCredentialProcessProviderErrors(t *testing.T) {
 					t.Setenv("MC_CREDENTIAL_PROCESS_TEST_FAIL", "1")
 				}
 			}
-			provider := newCredentialProcessProvider(command, credentials.SignatureV4)
+			provider := newTestCredentialProcessProvider(command, credentials.SignatureV4)
 			provider.now = func() time.Time { return now }
 			_, err := provider.Retrieve()
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
@@ -119,11 +146,166 @@ func TestCredentialProcessProviderErrors(t *testing.T) {
 func TestCredentialProviderChainPreservesErrors(t *testing.T) {
 	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_OUTPUT", "process failed")
 	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_FAIL", "1")
-	provider := newCredentialProcessProvider(credentialProcessTestCommand(), credentials.SignatureV4)
+	provider := newTestCredentialProcessProvider(credentialProcessTestCommand(), credentials.SignatureV4)
 	chain := &credentialProviderChain{providers: []credentials.Provider{provider}}
 
 	if _, err := chain.Retrieve(); err == nil || !strings.Contains(err.Error(), "process failed") {
 		t.Fatalf("expected process error, got %v", err)
+	}
+}
+
+func TestCredentialProcessManagerSharesCredentials(t *testing.T) {
+	var calls atomic.Int32
+	manager := newCredentialProcessManager(func(_ context.Context, _ []string) ([]byte, error) {
+		calls.Add(1)
+		return []byte(`{"AccessKeyId":"access","SecretAccessKey":"secret"}`), nil
+	})
+	first := newCredentialProcessProvider([]string{"helper", "same"}, credentials.SignatureV4)
+	first.manager = manager
+	second := newCredentialProcessProvider([]string{"helper", "same"}, credentials.SignatureV2)
+	second.manager = manager
+
+	firstValue, err := first.Retrieve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondValue, err := second.Retrieve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one helper invocation, got %d", calls.Load())
+	}
+	if firstValue.SignerType != credentials.SignatureV4 || secondValue.SignerType != credentials.SignatureV2 {
+		t.Fatalf("shared credentials lost signer types: %v, %v", firstValue.SignerType, secondValue.SignerType)
+	}
+}
+
+func TestCredentialProcessManagerSerializesHelpers(t *testing.T) {
+	var active, maximum atomic.Int32
+	manager := newCredentialProcessManager(func(_ context.Context, _ []string) ([]byte, error) {
+		current := active.Add(1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		active.Add(-1)
+		return []byte(`{"AccessKeyId":"access","SecretAccessKey":"secret"}`), nil
+	})
+
+	providers := []*credentialProcessProvider{
+		newCredentialProcessProvider([]string{"helper", "first"}, credentials.SignatureV4),
+		newCredentialProcessProvider([]string{"helper", "second"}, credentials.SignatureV4),
+	}
+	var wait sync.WaitGroup
+	for _, provider := range providers {
+		provider.manager = manager
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := provider.Retrieve(); err != nil {
+				t.Errorf("retrieve credentials: %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if maximum.Load() != 1 {
+		t.Fatalf("credential helpers overlapped: %d active", maximum.Load())
+	}
+}
+
+func TestCredentialProcessManagerRefreshesOnce(t *testing.T) {
+	now := time.Date(2026, time.October, 2, 10, 0, 0, 0, time.UTC)
+	var calls atomic.Int32
+	manager := newCredentialProcessManager(func(_ context.Context, _ []string) ([]byte, error) {
+		calls.Add(1)
+		return []byte(fmt.Sprintf(`{"AccessKeyId":"access","SecretAccessKey":"secret","Expiration":%q}`, now.Add(time.Hour).Format(time.RFC3339))), nil
+	})
+	providers := []*credentialProcessProvider{
+		newCredentialProcessProvider([]string{"helper"}, credentials.SignatureV4),
+		newCredentialProcessProvider([]string{"helper"}, credentials.SignatureV4),
+	}
+	for _, provider := range providers {
+		provider.manager = manager
+		provider.now = func() time.Time { return now }
+		if _, err := provider.Retrieve(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one initial invocation, got %d", calls.Load())
+	}
+
+	now = now.Add(49 * time.Minute)
+	var wait sync.WaitGroup
+	for _, provider := range providers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := provider.Retrieve(); err != nil {
+				t.Errorf("refresh credentials: %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if calls.Load() != 2 {
+		t.Fatalf("expected one shared refresh, got %d total invocations", calls.Load())
+	}
+}
+
+func TestCredentialProcessUsesTerminalInput(t *testing.T) {
+	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_OUTPUT", "placeholder")
+	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_READ_STDIN", "1")
+	var terminalOutput bytes.Buffer
+	output, err := runCredentialProcessWithTerminal(context.Background(), credentialProcessTestCommand(t.Name()), func() (*credentialProcessTerminal, error) {
+		return &credentialProcessTerminal{
+			input:  strings.NewReader("from-terminal\n"),
+			output: &terminalOutput,
+			close:  func() error { return nil },
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(output), `"AccessKeyId":"from-terminal"`) {
+		t.Fatalf("helper did not read terminal input: %s", output)
+	}
+	if terminalOutput.String() != "credential prompt" {
+		t.Fatalf("helper stderr was not routed to the terminal: %q", terminalOutput.String())
+	}
+}
+
+func TestCredentialProcessFailureIsNotCached(t *testing.T) {
+	var calls atomic.Int32
+	manager := newCredentialProcessManager(func(_ context.Context, _ []string) ([]byte, error) {
+		if calls.Add(1) == 1 {
+			return nil, errors.New("temporary failure")
+		}
+		return []byte(`{"AccessKeyId":"access","SecretAccessKey":"secret"}`), nil
+	})
+	provider := newCredentialProcessProvider([]string{"helper"}, credentials.SignatureV4)
+	provider.manager = manager
+	if _, err := provider.Retrieve(); err == nil {
+		t.Fatal("expected first retrieval to fail")
+	}
+	if _, err := provider.Retrieve(); err != nil {
+		t.Fatalf("expected retry to succeed: %v", err)
+	}
+}
+
+func TestS3FactoryPreflightsCredentialProcess(t *testing.T) {
+	t.Setenv("MC_CREDENTIAL_PROCESS_TEST_OUTPUT", "not-json")
+	factory := newFactory()
+	_, err := factory(&Config{
+		HostURL:           "https://example.com",
+		CredentialProcess: credentialProcessTestCommand(t.Name()),
+		Transport:         http.DefaultTransport,
+	})
+	if err == nil || !strings.Contains(err.ToGoError().Error(), "returned invalid JSON") {
+		t.Fatalf("expected credential process to fail during client construction, got %v", err)
 	}
 }
 

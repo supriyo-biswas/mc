@@ -178,6 +178,9 @@ func pipe(ctx *cli.Context, targetURL string, encKeyDB map[string][]prefixSSEPai
 		md5:              md5,
 		checksum:         checksum,
 	}
+	if err := initializeRemoteClients(targetURL); err != nil {
+		return err.Trace(targetURL)
+	}
 
 	var reader io.Reader
 	if !quiet && !json {

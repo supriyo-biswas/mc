@@ -250,6 +250,11 @@ func newFactory() func(config *Config) (Client, *probe.Error) {
 			if e != nil {
 				return nil, probe.NewError(e)
 			}
+			if len(config.CredentialProcess) > 0 {
+				if _, e = creds.GetWithContext(api.CredContext()); e != nil {
+					return nil, probe.NewError(e)
+				}
+			}
 
 			// If Amazon Accelerated URL is requested enable it.
 			if isS3AcceleratedEndpoint {

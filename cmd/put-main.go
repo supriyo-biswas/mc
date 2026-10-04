@@ -148,6 +148,8 @@ func mainPut(cliCtx *cli.Context) (e error) {
 	sourceURLs := args[:len(args)-1]
 	targetURL := args[len(args)-1]
 	fatalIf(requireAliasedURLs(cliCtx.Command.Name, targetURL), "")
+	clientURLs := append(append([]string(nil), sourceURLs...), targetURL)
+	fatalIf(initializeRemoteClients(clientURLs...), "Unable to initialize transfer clients.")
 
 	putURLsCh := make(chan URLs, 10000)
 	var totalObjects, totalBytes int64
